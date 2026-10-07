@@ -1,5 +1,5 @@
 {
-  "name": "gestion-sueno",
+  "name": "sueno-app",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -8,7 +8,7 @@
     "build": "vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "test": "node tests/sueno.test.mjs"
+    "test": "node --test tests/"
   },
   "dependencies": {
     "react": "^19.2.8",

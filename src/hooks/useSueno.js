@@ -1,148 +1,142 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { claveDia, sumarDias } from "../lib/tiempo";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { leer, escribir, borrarTodo, conNocheDeHoy } from "../nucleo/persistencia.js";
+import { nocheVacia, planValido, ajustesValidos } from "../nucleo/modelo.js";
 import {
-  AJUSTES_POR_DEFECTO,
   analizarNoche,
   calcularHistorial,
-  crearNoche,
-  diasParaSanar,
   energiaPrevista,
-  presupuestoNoche,
-} from "../lib/sueno";
+  nochesParaEstarEnPaz,
+  nocheDe,
+} from "../nucleo/calculos.js";
+import { enEje } from "../nucleo/reloj.js";
 
-const CLAVE = "gestion-sueno:v1";
-
-const ESTADO_INICIAL = {
-  ajustes: { ...AJUSTES_POR_DEFECTO },
-  noches: {},
-};
-
-function leer() {
-  try {
-    const crudo = localStorage.getItem(CLAVE);
-    if (!crudo) return ESTADO_INICIAL;
-    const guardado = JSON.parse(crudo);
-    return {
-      ajustes: { ...AJUSTES_POR_DEFECTO, ...(guardado.ajustes ?? {}) },
-      noches: guardado.noches ?? {},
-    };
-  } catch {
-    return ESTADO_INICIAL;
-  }
-}
-
+/**
+ * Estado global de la app.
+ *
+ * Acá vive la única verdad: el plan, las noches registradas y las preferencias.
+ * Todo lo demás se deriva con funciones puras de `nucleo/calculos.js`.
+ */
 export function useSueno() {
-  const [estado, setEstado] = useState(leer);
+  const [estado, setEstado] = useState(() => leer());
 
   useEffect(() => {
-    localStorage.setItem(CLAVE, JSON.stringify(estado));
+    escribir(estado);
   }, [estado]);
 
-  const hoy = claveDia();
+  // La noche en curso siempre existe, aunque todavía no haya nada anotado.
+  const noches = useMemo(() => conNocheDeHoy(estado.noches), [estado.noches]);
 
-  //arantee de que siempre exista la noche de hoy.
-  const noches = useMemo(() => {
-    const base = estado.noches;
-    return base[hoy] ? base : { ...base, [hoy]: crearNoche(hoy) };
-  }, [estado.noches, hoy]);
+  const plan = planValido(estado.plan);
+  const ajustes = ajustesValidos(estado.ajustes);
 
-  const historial = useMemo(
-    () => calcularHistorial(Object.values(noches), estado.ajustes),
-    [noches, estado.ajustes]
-  );
+  const historial = useMemo(() => calcularHistorial(noches, plan), [noches, plan]);
 
-  const analisisHoy = useMemo(
-    () => analizarNoche(noches[hoy], estado.ajustes),
-    [noches, hoy, estado.ajustes]
-  );
+  // El día al que pertenece la noche en curso. Se recalcula una vez por minuto
+  // en vez de en cada render, para no depender de una lectura del reloj al pintar.
+  const [hoy, setHoy] = useState(() => nocheDe(new Date()));
+  useEffect(() => {
+    const id = setInterval(() => setHoy(nocheDe(new Date())), 60000);
+    return () => clearInterval(id);
+  }, []);
+  const analisisHoy = useMemo(() => analizarNoche(noches[hoy], plan), [noches, hoy, plan]);
 
   const deudaMin = historial.length ? historial[historial.length - 1].deuda : 0;
-  const ultimaNocheCompleta = [...historial].reverse().find((n) => n.completa) ?? null;
-  const energia = energiaPrevista(analisisHoy, ultimaNocheCompleta?.deuda ?? deudaMin);
+  const energia = energiaPrevista(analisisHoy, deudaMin);
+  const nochesParaSanar = nochesParaEstarEnPaz(deudaMin, historial);
 
-  const actualizarNoche = useCallback(
-    (campo, valor) => {
-      setEstado((prev) => {
-        const actual = prev.noches[hoy] ?? crearNoche(hoy);
-        return {
-          ...prev,
-          noches: {
-            ...prev.noches,
-            [hoy]: { ...actual, [campo]: valor, actualizado: Date.now() },
-          },
-        };
-      });
-    },
-    [hoy]
-  );
+  const setPlan = useCallback((cambios) => {
+    setEstado((prev) => ({ ...prev, plan: planValido({ ...prev.plan, ...cambios }) }));
+  }, []);
 
-  const ajustarNoche = useCallback(
-    (campo, deltaMin) => {
-      setEstado((prev) => {
-        const actual = prev.noches[hoy] ?? crearNoche(hoy);
-        const base = actual[campo] ?? (campo === "dormir" ? 330 : 420);
-        const siguiente = Math.max(0, Math.min(16 * 60, base + deltaMin));
-        return {
-          ...prev,
-          noches: {
-            ...prev.noches,
-            [hoy]: { ...actual, [campo]: siguiente, actualizado: Date.now() },
-          },
-        };
-      });
-    },
-    [hoy]
-  );
+  const setAjuste = useCallback((cambios) => {
+    setEstado((prev) => ({
+      ...prev,
+      ajustes: ajustesValidos({ ...prev.ajustes, ...cambios }),
+    }));
+  }, []);
 
-  const borrarNocheHoy = useCallback(() => {
+  const marcar = useCallback((fecha, cambios) => {
     setEstado((prev) => {
-      const noches = { ...prev.noches };
-      delete noches[hoy];
-      return { ...prev, noches };
-    });
-  }, [hoy]);
-
-  const ajustarAjuste = useCallback((campo, deltaMin) => {
-    setEstado((prev) => {
-      const base = prev.ajustes[campo];
-      const siguiente = Math.max(0, Math.min(16 * 60, base + deltaMin));
-      const ajustes = { ...prev.ajustes, [campo]: siguiente };
-      if (ajustes.despertar <= ajustes.dormir) {
-        if (campo === "dormir") ajustes.dormir = ajustes.despertar - 240;
-        else ajustes.despertar = ajustes.dormir + 360;
-      }
-      return { ...prev, ajustes };
+      const base = prev.noches[fecha] ?? nocheVacia(fecha);
+      return {
+        ...prev,
+        noches: { ...prev.noches, [fecha]: { ...base, ...cambios, updatedAt: Date.now() } },
+      };
     });
   }, []);
 
-  const reiniciar = useCallback(() => setEstado(ESTADO_INICIAL), []);
-
-  // Últimos N días listos para pintar.
-  const ventana = useMemo(
-    () =>
-      Array.from({ length: 14 }, (_, i) => sumarDias(hoy, -(13 - i))).map((fecha) => {
-        const fila = historial.find((n) => n.fecha === fecha);
-        return fila
-          ? { ...fila, futuro: false }
-          : { fecha, dormir: null, levantar: null, durmido: null, deuda: null, futuro: true };
-      }),
-    [historial, hoy]
+  const acostarse = useCallback(
+    (fecha, minuto) => marcar(fecha, { acostarse: minuto, avisada: true }),
+    [marcar]
   );
 
-  const ultimos7 = historial.slice(-7);
+  const levantarse = useCallback(
+    (fecha, minuto) => marcar(fecha, { levantarse: minuto }),
+    [marcar]
+  );
+
+  const borrarNoche = useCallback((fecha) => {
+    setEstado((prev) => {
+      const noches = { ...prev.noches };
+      delete noches[fecha];
+      return { ...prev, noches };
+    });
+  }, []);
+
+  const reiniciar = useCallback(() => {
+    borrarTodo();
+    setEstado({ version: estado.version, plan: estado.plan, ajustes: estado.ajustes, noches: {} });
+  }, [estado]);
 
   return {
-    hoy,
-    ajustes: estado.ajustes,
+    estado,
+    plan,
+    ajustes,
     noches,
     historial,
+    hoy,
     analisisHoy,
-    ventana,
-    ultimos7,
     deudaMin,
     energia,
-    presupuestoNoche: presupuestoNoche(estado.ajustes),
-    diasParaSanar: diasParaSanar(deudaMin, ultimos7),
-    acciones: { actualizarNoche, ajustarNoche, borrarNocheHoy, ajustarAjuste, reiniciar },
+    nochesParaSanar,
+    acciones: {
+      setPlan,
+      setAjuste,
+      marcar,
+      acostarse,
+      levantarse,
+      borrarNoche,
+      reiniciar,
+    },
   };
+}
+
+/** Reloj vivo: se refresca solo para que la app no quede congelada. */
+export function useReloj(intervaloMs = 20000) {
+  const [ahora, setAhora] = useState(() => new Date());
+  useEffect(() => {
+    const id = setInterval(() => setAhora(new Date()), intervaloMs);
+    const alVolver = () => setAhora(new Date());
+    document.addEventListener("visibilitychange", alVolver);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", alVolver);
+    };
+  }, [intervaloMs]);
+  return { ahora, eje: enEje(ahora) };
+}
+
+/** Un `setTimeout` que se limpia solo y no dispara si el componente se desmonta. */
+export function useTemporizador() {
+  const referencia = useRef(null);
+  const armar = useCallback((alDisparar, milisegundos) => {
+    if (referencia.current) clearTimeout(referencia.current);
+    referencia.current = setTimeout(alDisparar, Math.max(0, milisegundos));
+  }, []);
+  const cancelar = useCallback(() => {
+    if (referencia.current) clearTimeout(referencia.current);
+    referencia.current = null;
+  }, []);
+  useEffect(() => cancelar, [cancelar]);
+  return { armar, cancelar };
 }

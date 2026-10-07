@@ -1,0 +1,12 @@
+{
+  "name": "La noche es un recurso",
+  "short_name": "Noche",
+  "description": "Avisos de hora de dormir y registro de noches.",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#05070e",
+  "theme_color": "#05070e",
+  "icons": [
+    { "src": "./favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}
